@@ -362,7 +362,7 @@
   }
 
   /* ---------------- dados: mesmas funções que o Apps Script oferecia ---------------- */
-  var TAB = { Clientes: 'clientes', Fornecedores: 'fornecedores', Projetos: 'projetos', Pedidos: 'pedidos', Custos: 'custos', Lancamentos: 'lancamentos', Documentos: 'documentos', Extrato: 'extrato', Conciliacoes: 'conciliacoes', Regras: 'regras_conciliacao', Importacoes: 'importacoes' };
+  var TAB = { Clientes: 'clientes', Fornecedores: 'fornecedores', Projetos: 'projetos', Pedidos: 'pedidos', Custos: 'custos', Lancamentos: 'lancamentos', Documentos: 'documentos', Extrato: 'extrato', Conciliacoes: 'conciliacoes', Regras: 'regras_conciliacao', Importacoes: 'importacoes', Saldos: 'saldos_abertura' };
   var COLS = {
     Clientes: ['id', 'nome', 'nome_extrato', 'pais', 'contato', 'email', 'telefone', 'conta_padrao', 'status', 'obs', 'criado_em'],
     Fornecedores: ['id', 'nome', 'nome_extrato', 'pais', 'contato', 'email', 'obs', 'criado_em'],
@@ -374,6 +374,7 @@
     Extrato: ['id', 'banco', 'data', 'descricao', 'valor', 'status', 'detalhe', 'referencia', 'nota', 'cartao', 'categoria_banco', 'moeda', 'tracking_id', 'momento', 'chave', 'situacao', 'tipo', 'categoria', 'obs', 'auto', 'decidido_por', 'decidido_em', 'arquivo', 'importado_em', 'importado_por', 'importacao_id'],
     Conciliacoes: ['id', 'extrato_id', 'lancamento_id', 'criado_em', 'criado_por'],
     Regras: ['id', 'padrao', 'tipo', 'categoria', 'criado_em', 'criado_por'],
+    Saldos: ['id', 'data', 'valor', 'obs', 'alterado_em', 'alterado_por'],
     Importacoes: ['id', 'banco', 'arquivo', 'periodo_de', 'periodo_ate', 'linhas', 'novos', 'duplicados', 'ignoradas', 'importado_por', 'importado_em', 'desfeita_em', 'desfeita_por']
   };
   var NUM = { qtde: 1, valor_venda: 1, custo_total: 1, valor: 1 };
@@ -403,7 +404,7 @@
     getData: function () {
       return prontoP.then(function () {
         var nomes = Object.keys(TAB);
-        var opc = { Extrato: 1, Conciliacoes: 1, Regras: 1, Importacoes: 1 };
+        var opc = { Extrato: 1, Conciliacoes: 1, Regras: 1, Importacoes: 1, Saldos: 1 };
         return Promise.all(nomes.map(function (n) { return opc[n] ? todos(TAB[n]).catch(function () { return []; }) : todos(TAB[n]); }).concat([q(SB.from('config').select('*'))])).then(function (res) {
           var d = {};
           nomes.forEach(function (n, i) { d[n] = res[i].map(limpa); });
@@ -486,6 +487,7 @@
       }
       return cab.then(lote);
     },
+    salvarSaldo: function (r) { return SB.from('saldos_abertura').upsert({ id: String(r.id).toUpperCase(), data: r.data, valor: Number(r.valor), obs: r.obs || null }, { onConflict: 'id' }).then(function (x) { if (x.error) throw erroBanco(x.error); return true; }); },
     desfazerImportacao: function (id) { return SB.rpc('desfazer_importacao', { p_id: Number(id) }).then(function (r) { if (r.error) throw erroBanco(r.error); return r.data; }); },
     conciliar: function (id, lancs, realizar) { return SB.rpc('conciliar_extrato', { p_extrato: id, p_lancs: lancs, p_realizar: realizar !== false }).then(function (r) { if (r.error) throw erroBanco(r.error); return true; }); },
     desconciliar: function (id) { return SB.rpc('desconciliar_extrato', { p_extrato: id }).then(function (r) { if (r.error) throw erroBanco(r.error); return true; }); },
@@ -554,7 +556,7 @@ function indexData() {
   d.Custos.forEach(function (c) { (d.custBy[c.pedido] = d.custBy[c.pedido] || []).push(c); });
   d.Documentos.forEach(function (x) { d.docById[x.id] = x; if (x.pedido) (d.docBy[x.pedido] = d.docBy[x.pedido] || []).push(x); });
   d.Pedidos.forEach(function (p) { p.f = fin(p); });
-  d.Extrato = d.Extrato || []; d.Conciliacoes = d.Conciliacoes || []; d.Regras = d.Regras || []; d.Importacoes = d.Importacoes || [];
+  d.Extrato = d.Extrato || []; d.Conciliacoes = d.Conciliacoes || []; d.Regras = d.Regras || []; d.Importacoes = d.Importacoes || []; d.Saldos = d.Saldos || [];
   d.cliIdx = {}; d.Clientes.forEach(function (c) { d.cliIdx[c.nome] = c; });
   d.fornIdx = {}; d.Fornecedores.forEach(function (f) { d.fornIdx[f.nome] = f; });
   d.lancById = {}; d.Lancamentos.forEach(function (l) { d.lancById[l.id] = l; });
@@ -1159,6 +1161,22 @@ function extInfo(e, comCat) { return [e.detalhe, e.referencia, e.nota, e.cartao 
 function tipoDaCat(c) { return /transfer|aporte|intercompany/i.test(c || '') ? 'Transferência' : 'Despesa'; }
 function contraparte(l) { return l.natureza === 'Recebimento' ? clienteDe(l.pedido) : l.fornecedor; }
 function lancResumo(l) { return esc(l.pedido) + ' · ' + esc(l.parcela) + ' · ' + esc(contraparte(l) || '') + ' · ' + mt(l.valor) + (l.situacao === 'Previsto' ? ' <span class="badge b-warn">previsto</span>' : ''); }
+/** Saldo da conta após cada movimento: saldo de abertura + movimentos em ordem cronológica. */
+function saldosExtrato() {
+  var d = S.d, ab = {}, out = { porMov: {}, final: {} };
+  d.Saldos.forEach(function (x) { ab[x.id] = x; });
+  var porBanco = {}; d.Extrato.forEach(function (e) { (porBanco[e.banco] = porBanco[e.banco] || []).push(e); });
+  Object.keys(porBanco).concat(Object.keys(ab)).forEach(function (b) {
+    if (out.final[b]) return;
+    var a = ab[b], s = a ? Number(a.valor) : 0, ult = a ? a.data : '';
+    (porBanco[b] || []).slice().sort(function (x, y) { return x.data.localeCompare(y.data) || String(x.momento || '').localeCompare(String(y.momento || '')) || y.id.localeCompare(x.id); }).forEach(function (e) {   // empate: o arquivo da Mercury vem do mais novo para o mais antigo
+      if (a && e.data < a.data) return;
+      s += Number(e.valor) || 0; out.porMov[e.id] = s; ult = e.data;
+    });
+    out.final[b] = { saldo: s, data: ult, abertura: a || null };
+  });
+  return out;
+}
 function filtConc() {
   var d = S.d, F = function (k) { return fv('conciliacao', k); }, q = F('q').toLowerCase();
   return d.Extrato.filter(function (e) {
@@ -1190,7 +1208,10 @@ function vConc() {
     (k.alta ? '<button class="btn" data-act="aceitarAltas">✓ Aceitar ' + k.alta + ' sugest' + (k.alta === 1 ? 'ão' : 'ões') + ' de alta confiança</button>' : '') +
     '<button class="btn pri" data-act="importarExtrato">⤒ Importar extrato</button><input type="file" id="extFile" accept=".xlsx,.xls,.csv" style="display:none"></div>';
   if (!d.Extrato.length) return h + '<div class="card" style="padding:28px;text-align:center"><p style="font-size:15px">Nenhum extrato importado ainda.</p><p class="muted">Exporte o extrato da Mercury (Transactions → Export, em Excel ou CSV) e clique em <b>Importar extrato</b>. Movimentos repetidos são ignorados, então pode importar o mesmo período mais de uma vez.</p></div>';
-  h += '<div class="grid kpis row" style="--n:5;margin-bottom:14px">' +
+  var SD = saldosExtrato(), bks = F('banco') ? [F('banco')] : Object.keys(SD.final).sort();
+  var saldoCard = '<div class="card kpi"><div class="l">Saldo da conta <a href="#" data-act="editSaldo" data-b="' + esc(bks[0] || 'MERCURY') + '" title="Saldo de abertura" style="float:right">✎</a></div>' +
+    bks.map(function (b) { var x = SD.final[b]; return '<div class="v" style="font-size:' + (bks.length > 1 ? '14' : '18') + 'px">' + (bks.length > 1 ? '<span class="small muted">' + esc(b) + '</span> ' : '') + '<span class="' + (x.saldo < 0 ? 'db-t' : 'cr-t') + '">' + mt(x.saldo) + '</span></div><div class="s">' + (x.data ? 'em ' + dbr(x.data) + ' · ' : '') + (x.abertura ? 'abertura ' + mt(x.abertura.valor) + ' em ' + dbr(x.abertura.data) : '<span class="neg">sem saldo de abertura</span>') + '</div>'; }).join('') + '</div>';
+  h += '<div class="grid kpis row" style="--n:6;margin-bottom:14px">' + saldoCard +
     '<div class="card kpi"><div class="l">Extrato no período</div><div class="v" style="font-size:15px"><span class="cr-t">+' + mt(k.ent) + '</span><br><span class="db-t">−' + mt(k.sai) + '</span></div><div class="s">' + k.ne + ' entradas · ' + k.ns + ' saídas</div></div>' +
     card('Conciliado', 'Conciliado com a operação', mt(k.conc[1]), k.conc[0] + ' movimentos ligados a lançamentos') +
     card('Classificado', 'Despesas e transferências', mt(k.desp[1] + k.transf[1]), k.desp[0] + ' despesas (' + mt(k.desp[1]) + ') · ' + k.transf[0] + ' transf. (' + mt(k.transf[1]) + ')') +
@@ -1213,13 +1234,13 @@ function vConc() {
       '<span class="muted">' + esc(sug.motivo) + '</span>' + (sug.conf !== 'baixa' ? '<button class="btn sm pri" data-act="aceitarSug" data-id="' + e.id + '">✓ Aceitar</button>' : '') + '</div>';
     return '<tr class="' + (ent ? 'cr' : 'db') + '"><td class="small">' + dbr(e.data) + '<div class="muted">' + esc(e.banco) + '</div></td>' +
       '<td class="wrap"><div class="code">' + esc(e.descricao) + '</div><div class="small muted">' + esc(extInfo(e)) + '</div></td>' +
-      '<td class="n">' + (ent ? m(v) : '') + '</td><td class="n">' + (ent ? '' : m(-v)) + '</td><td class="wrap">' + st + '</td>' +
-      '<td class="n" style="white-space:nowrap">' + (e.situacao === 'Pendente' ? '<button class="btn sm" data-act="abrirConc" data-id="' + e.id + '">Conciliar</button>' : '<button class="btn sm ghost" data-act="abrirConc" data-id="' + e.id + '" title="Alterar">✎</button><button class="btn sm ghost" data-act="desfazerConc" data-id="' + e.id + '" title="Voltar para pendente">↺</button>') + '</td></tr>';
+      '<td class="n">' + (ent ? m(v) : '') + '</td><td class="n">' + (ent ? '' : m(-v)) + '</td><td class="n saldo small">' + (SD.porMov[e.id] !== undefined ? m(SD.porMov[e.id]) : '<span class="muted">–</span>') + '</td><td class="wrap">' + st + '</td>' +
+      '<td class="n" style="white-space:nowrap">' + (e.situacao === 'Pendente' ? '<button class="btn sm" data-act="abrirConc" data-id="' + e.id + '">Conciliar</button>' : '<button class="btn sm" data-act="abrirConc" data-id="' + e.id + '" title="Alterar a classificação ou o vínculo">Alterar</button><button class="btn sm ghost" data-act="desfazerConc" data-id="' + e.id + '" title="Voltar para pendente">↺</button>') + '</td></tr>';
   }).join('');
   var te = 0, ts = 0; list.forEach(function (e) { var v = Number(e.valor); if (v >= 0) te += v; else ts += -v; });
-  h += '<div class="card tbl"><table><thead><tr><th>Data</th><th>Descrição no banco</th><th class="n">Entrada</th><th class="n">Saída</th><th>Situação / vínculo</th><th></th></tr></thead><tbody>' +
-    (rows || '<tr><td colspan="6" class="empty">Nenhum movimento com esses filtros.</td></tr>') + '</tbody>' +
-    (list.length ? '<tfoot><tr><td colspan="2">Total filtrado</td><td class="n cr-t">' + m(te) + '</td><td class="n db-t">' + m(ts) + '</td><td colspan="2">Líquido ' + mt(te - ts) + '</td></tr></tfoot>' : '') + '</table></div>';
+  h += '<div class="card tbl"><table><thead><tr><th>Data</th><th>Descrição no banco</th><th class="n">Entrada</th><th class="n">Saída</th><th class="n">Saldo</th><th>Situação / vínculo</th><th></th></tr></thead><tbody>' +
+    (rows || '<tr><td colspan="7" class="empty">Nenhum movimento com esses filtros.</td></tr>') + '</tbody>' +
+    (list.length ? '<tfoot><tr><td colspan="2">Total filtrado</td><td class="n cr-t">' + m(te) + '</td><td class="n db-t">' + m(ts) + '</td><td></td><td colspan="2">Líquido ' + mt(te - ts) + '</td></tr></tfoot>' : '') + '</table></div>';
   if (list.length > 500) h += '<p class="small muted">Mostrando 500 de ' + list.length + '; refine os filtros.</p>';
   // resumo por categoria
   var cat = {}, totD = 0;
@@ -1375,28 +1396,36 @@ function previaExtrato(lido, arquivo) {
       '<div class="cand" style="max-height:52vh"><table><thead><tr><th></th><th>Data</th><th>Descrição no banco</th><th class="n">Entrada</th><th class="n">Saída</th><th>Proposta</th></tr></thead><tbody>' +
       novos.map(function (e) {
         var p = prop[e._tmp], v = e.valor, txt;
-        if (!p) txt = '<span class="muted small">Sem proposta — fica pendente</span>';
-        else if (p.k === 'regra') txt = '<span class="badge ' + (p.r.tipo === 'Transferência' ? '' : 'b-info') + '">' + esc(p.r.tipo) + '</span> <b class="small">' + esc(p.r.categoria) + '</b> <span class="small muted">· regra "' + esc(p.r.padrao) + '"</span>';
-        else txt = '<span class="badge ' + (p.k === 'baixa' ? 'b-warn' : 'b-pos') + '">Sugestão ' + esc(p.s.conf) + '</span> <span class="small">' + p.s.ids.map(function (id) { var l = d.lancById[id]; return esc(l.pedido) + ' (' + mt(l.valor) + ')'; }).join(' + ') + '</span>' + (p.k === 'baixa' ? '<div class="small muted">' + esc(p.s.motivo) + ' — revise depois na tela</div>' : '');
-        return '<tr class="' + (v >= 0 ? 'cr' : 'db') + '"><td>' + (p && p.k !== 'baixa' ? '<input type="checkbox" class="pv" value="' + e._tmp + '"' + (p.marcado ? ' checked' : '') + ' data-k="' + (p.k === 'regra' ? 'regra' : p.s.conf) + '">' : '') + '</td><td class="small">' + dbr(e.data) + '</td>' +
+        var selCat = function (def, nota) { return '<select class="pc" data-t="' + e._tmp + '" data-def="' + esc(def) + '" style="max-width:240px">' + opt(catsDespesa(), def, '— deixar pendente —') + '</select>' + (nota ? ' <span class="small muted">' + nota + '</span>' : ''); };
+        if (!p) txt = selCat('', 'sem proposta: escolha uma categoria ou deixe pendente');
+        else if (p.k === 'regra') txt = selCat(p.r.categoria, '· regra "' + esc(p.r.padrao) + '" (pode trocar)');
+        else txt = '<span class="badge ' + (p.k === 'baixa' ? 'b-warn' : 'b-pos') + '">Sugestão ' + esc(p.s.conf) + '</span> <span class="small">' + p.s.ids.map(function (id) { var l = d.lancById[id]; return esc(l.pedido) + ' (' + mt(l.valor) + ')'; }).join(' + ') + '</span>' + (p.k === 'baixa' ? '<div class="small muted">' + esc(p.s.motivo) + ' — revise depois na tela, ou classifique:</div>' + selCat('') : '');
+        return '<tr class="' + (v >= 0 ? 'cr' : 'db') + '"><td>' + (p && p.k === 'sug' ? '<input type="checkbox" class="pv" value="' + e._tmp + '"' + (p.marcado ? ' checked' : '') + ' data-k="' + (p.k === 'regra' ? 'regra' : p.s.conf) + '">' : '') + '</td><td class="small">' + dbr(e.data) + '</td>' +
           '<td class="wrap"><div class="code">' + esc(e.descricao) + '</div><div class="small muted">' + esc(extInfo(e)) + '</div></td><td class="n">' + (v >= 0 ? m(v) : '') + '</td><td class="n">' + (v < 0 ? m(-v) : '') + '</td><td class="wrap">' + txt + '</td></tr>';
       }).join('') + '</tbody></table></div>' +
-      '<p class="small muted" style="margin-top:8px">Nada foi gravado ainda. <b>Conciliar</b> importa todos os movimentos novos e aplica só as propostas marcadas; o resto fica pendente para você resolver na tela. <b>Só importar</b> grava tudo como pendente.</p><div class="err" id="perr"></div></div>' +
+      '<p class="small muted" style="margin-top:8px">Nada foi gravado ainda. <b>Conciliar</b> importa todos os movimentos novos e aplica só o que está marcado ou com categoria escolhida (você pode trocar a categoria proposta); o resto fica pendente para você resolver na tela. <b>Só importar</b> grava tudo como pendente.</p><div class="err" id="perr"></div></div>' +
       '<footer><button class="btn" data-x style="margin-right:auto">Cancelar</button><button class="btn" id="pso">Só importar</button><button class="btn pri" id="pok">Conciliar</button></footer>';
   }
   var box = $('#mbox'); box.innerHTML = h; box.classList.add('wide'); $('#modal').classList.add('on');
   $$('[data-x]', box).forEach(function (b) { b.onclick = closeModal; });
   if (!novos.length) return;
   var ok = $('#pok', box), so = $('#pso', box);
-  var conta = function () { var n = $$('.pv:checked', box).length; ok.textContent = 'Conciliar' + (n ? ' (' + n + ' marcados)' : ''); };
-  $$('.pv', box).forEach(function (c) { c.onchange = conta; }); conta();
-  $$('[data-m]', box).forEach(function (b) { b.onclick = function () { var m2 = b.dataset.m; $$('.pv', box).forEach(function (c) { c.checked = m2 === 'todos' ? true : m2 === 'nenhum' ? false : (c.dataset.k === m2 ? true : c.checked); }); conta(); }; });
+  var conta = function () { var n = $$('.pv:checked', box).length + $$('.pc', box).filter(function (x) { return x.value; }).length; ok.textContent = 'Conciliar' + (n ? ' (' + n + ' marcados)' : ''); };
+  $$('.pv', box).forEach(function (c) { c.onchange = conta; }); $$('.pc', box).forEach(function (c) { c.onchange = conta; }); conta();
+  $$('[data-m]', box).forEach(function (b) { b.onclick = function () {
+    var m2 = b.dataset.m;
+    $$('.pv', box).forEach(function (c) { c.checked = m2 === 'todos' ? true : m2 === 'nenhum' ? false : (c.dataset.k === m2 ? true : c.checked); });
+    $$('.pc', box).forEach(function (c) { if (m2 === 'nenhum') c.value = ''; else if ((m2 === 'regra' || m2 === 'todos') && c.dataset.def) c.value = c.dataset.def; });
+    conta();
+  }; });
   var executar = function (aplicar) {
-    var marc = {}; if (aplicar) $$('.pv:checked', box).forEach(function (c) { marc[c.value] = 1; });
+    var marc = {}, cats = {};
+    if (aplicar) { $$('.pv:checked', box).forEach(function (c) { marc[c.value] = 1; }); $$('.pc', box).forEach(function (c) { if (c.value) cats[c.dataset.t] = c.value; }); }
     ok.disabled = so.disabled = true; ok.textContent = 'Gravando…';
     var linhas = novos.map(function (e) {
       var o = Object.assign({}, e), p = prop[e._tmp]; delete o._tmp;
-      if (marc[e._tmp] && p.k === 'regra') { o.situacao = 'Classificado'; o.tipo = p.r.tipo; o.categoria = p.r.categoria; o.auto = true; }
+      var c = cats[e._tmp];
+      if (c) { var deRegra = p && p.k === 'regra' && p.r.categoria === c; o.situacao = 'Classificado'; o.categoria = c; o.tipo = deRegra ? p.r.tipo : tipoDaCat(c); o.auto = !!deRegra; }
       return o;
     });
     run('importarExtrato', linhas, { arquivo: arquivo, ignoradas: lido.ignoradas }).then(function (res) {
@@ -1405,8 +1434,8 @@ function previaExtrato(lido, arquivo) {
         return pr.then(function () { ok.textContent = 'Conciliando ' + (++n) + ' de ' + fila.length + '…'; return conciliarComo(Object.assign({}, e, { id: ids[e.chave] }), prop[e._tmp].s.ids, true).catch(function () { falhas++; }); });
       }, Promise.resolve()).then(function () {
         closeModal();
-        var nr = Object.keys(marc).filter(function (k) { return prop[k].k === 'regra'; }).length;
-        toast(res.novos + ' movimentos importados' + (aplicar ? ' · ' + nr + ' classificados por regra · ' + (fila.length - falhas) + ' conciliados' : ' como pendentes') + (falhas ? ' · ' + falhas + ' não conciliaram (ficaram pendentes)' : '') + '.');
+        var nr = Object.keys(cats).length;
+        toast(res.novos + ' movimentos importados' + (aplicar ? ' · ' + nr + ' classificados · ' + (fila.length - falhas) + ' conciliados' : ' como pendentes') + (falhas ? ' · ' + falhas + ' não conciliaram (ficaram pendentes)' : '') + '.');
         return load();
       });
     }).catch(function (x) { var el = $('#perr', box); el.style.display = 'block'; el.textContent = x; ok.disabled = so.disabled = false; conta(); });
@@ -1597,6 +1626,14 @@ var ACT = {
   verForn: function (ds) { go('lancamentos', { forn: ds.forn, nat: 'Pagamento' }); },
   verProj: function (ds) { go('pedidos', { cliente: ds.cli, projeto: ds.c, q: '' }); },
   toggleHist: function () { S.histAberto = !S.histAberto; render(); if (S.histAberto) { var h = document.querySelector('[data-act=toggleHist]'); if (h) h.scrollIntoView({ block: 'start' }); } },
+  editSaldo: function (ds) {
+    var b = ds.b || 'MERCURY', x = S.d.Saldos.filter(function (s2) { return s2.id === b; })[0] || { id: b, data: '2026-01-01', valor: '' };
+    form({ title: 'Saldo de abertura da conta', rec: { banco: x.id, data: x.data, valor: x.valor, obs: x.obs || '' },
+      fields: [{ k: 'banco', label: 'Banco', type: 'select', options: uniq(bancos().concat(S.d.Extrato.map(function (e) { return e.banco; }))), req: 1 },
+        { k: 'data', label: 'Data do saldo', type: 'date', req: 1, hint: 'Saldo no início deste dia, antes dos movimentos.' },
+        { k: 'valor', label: 'Saldo (US$)', type: 'number', req: 1 }, { k: 'obs', label: 'Observação', full: 1 }],
+      onSave: function (v) { return run('salvarSaldo', { id: v.banco, data: v.data, valor: Number(v.valor), obs: v.obs }).then(function () { return 'Saldo de abertura salvo.'; }); } });
+  },
   filtImp: function (ds) { S.f.conciliacao = { imp: String(ds.id) }; render(); window.scrollTo(0, 0); },
   desfazerImp: function (ds) {
     var b = document.querySelector('[data-act=desfazerImp][data-id="' + ds.id + '"]');
