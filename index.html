@@ -362,7 +362,7 @@
   }
 
   /* ---------------- dados: mesmas funções que o Apps Script oferecia ---------------- */
-  var TAB = { Clientes: 'clientes', Fornecedores: 'fornecedores', Projetos: 'projetos', Pedidos: 'pedidos', Custos: 'custos', Lancamentos: 'lancamentos', Documentos: 'documentos', Extrato: 'extrato', Conciliacoes: 'conciliacoes', Regras: 'regras_conciliacao' };
+  var TAB = { Clientes: 'clientes', Fornecedores: 'fornecedores', Projetos: 'projetos', Pedidos: 'pedidos', Custos: 'custos', Lancamentos: 'lancamentos', Documentos: 'documentos', Extrato: 'extrato', Conciliacoes: 'conciliacoes', Regras: 'regras_conciliacao', Importacoes: 'importacoes' };
   var COLS = {
     Clientes: ['id', 'nome', 'nome_extrato', 'pais', 'contato', 'email', 'telefone', 'conta_padrao', 'status', 'obs', 'criado_em'],
     Fornecedores: ['id', 'nome', 'nome_extrato', 'pais', 'contato', 'email', 'obs', 'criado_em'],
@@ -371,9 +371,10 @@
     Custos: ['id', 'pedido', 'fornecedor', 'descricao', 'qtde', 'custo_total', 'obs', 'origem', 'criado_em'],
     Lancamentos: ['id', 'data', 'pedido', 'natureza', 'parcela', 'fornecedor', 'valor', 'situacao', 'referencia', 'doc_ids', 'obs', 'origem', 'criado_em', 'custo_id', 'banco'],
     Documentos: ['id', 'data_upload', 'tipo', 'entidade', 'ref_id', 'pedido', 'cliente', 'nome_arquivo', 'url', 'file_id', 'storage_path', 'enviado_por', 'obs'],
-    Extrato: ['id', 'banco', 'data', 'descricao', 'valor', 'status', 'detalhe', 'referencia', 'nota', 'cartao', 'categoria_banco', 'moeda', 'tracking_id', 'momento', 'chave', 'situacao', 'tipo', 'categoria', 'obs', 'auto', 'decidido_por', 'decidido_em', 'arquivo', 'importado_em', 'importado_por'],
+    Extrato: ['id', 'banco', 'data', 'descricao', 'valor', 'status', 'detalhe', 'referencia', 'nota', 'cartao', 'categoria_banco', 'moeda', 'tracking_id', 'momento', 'chave', 'situacao', 'tipo', 'categoria', 'obs', 'auto', 'decidido_por', 'decidido_em', 'arquivo', 'importado_em', 'importado_por', 'importacao_id'],
     Conciliacoes: ['id', 'extrato_id', 'lancamento_id', 'criado_em', 'criado_por'],
-    Regras: ['id', 'padrao', 'tipo', 'categoria', 'criado_em', 'criado_por']
+    Regras: ['id', 'padrao', 'tipo', 'categoria', 'criado_em', 'criado_por'],
+    Importacoes: ['id', 'banco', 'arquivo', 'periodo_de', 'periodo_ate', 'linhas', 'novos', 'duplicados', 'ignoradas', 'importado_por', 'importado_em', 'desfeita_em', 'desfeita_por']
   };
   var NUM = { qtde: 1, valor_venda: 1, custo_total: 1, valor: 1 };
   var ROT = { nome: 'Nome', codigo: 'Código' };
@@ -402,7 +403,7 @@
     getData: function () {
       return prontoP.then(function () {
         var nomes = Object.keys(TAB);
-        var opc = { Extrato: 1, Conciliacoes: 1, Regras: 1 };
+        var opc = { Extrato: 1, Conciliacoes: 1, Regras: 1, Importacoes: 1 };
         return Promise.all(nomes.map(function (n) { return opc[n] ? todos(TAB[n]).catch(function () { return []; }) : todos(TAB[n]); }).concat([q(SB.from('config').select('*'))])).then(function (res) {
           var d = {};
           nomes.forEach(function (n, i) { d[n] = res[i].map(limpa); });
@@ -460,19 +461,28 @@
         }).then(function () { return s; });
       });
     },
-    importarExtrato: function (linhas) {
-      var cols = COLS.Extrato.filter(function (k) { return ['id', 'decidido_por', 'decidido_em', 'importado_em', 'importado_por'].indexOf(k) < 0; });
+    importarExtrato: function (linhas, info) {
+      info = info || {};
+      var cols = COLS.Extrato.filter(function (k) { return ['id', 'decidido_por', 'decidido_em', 'importado_em', 'importado_por', 'importacao_id'].indexOf(k) < 0; });
       var rows = linhas.map(function (r) { var o = {}; cols.forEach(function (k) { if (r[k] !== undefined) o[k] = r[k] === '' ? null : r[k]; }); return o; });
-      var novos = 0, i = 0;
+      var datas = rows.map(function (r) { return r.data; }).filter(String).sort();
+      var novos = 0, i = 0, impId = null;
+      // registra a importação no histórico (se a tabela ainda não existir, importa assim mesmo)
+      var cab = SB.from('importacoes').insert({ banco: (rows[0] && rows[0].banco) || 'MERCURY', arquivo: info.arquivo || null, periodo_de: datas[0] || null, periodo_ate: datas[datas.length - 1] || null,
+        linhas: rows.length, ignoradas: info.ignoradas || 0 }).select('id').single().then(function (r) { if (!r.error) impId = r.data.id; }, function () {});
       function lote() {
-        if (i >= rows.length) return Promise.resolve({ novos: novos, total: rows.length });
-        var parte = rows.slice(i, i + 300); i += 300;
+        if (i >= rows.length) {
+          var fim = { novos: novos, total: rows.length };
+          return impId ? SB.from('importacoes').update({ novos: novos, duplicados: rows.length - novos }).eq('id', impId).then(function () { return fim; }) : Promise.resolve(fim);
+        }
+        var parte = rows.slice(i, i + 300).map(function (r) { return impId ? Object.assign({ importacao_id: impId }, r) : r; }); i += 300;
         return SB.from('extrato').upsert(parte, { onConflict: 'chave', ignoreDuplicates: true }).select('id').then(function (r) {
           if (r.error) throw erroBanco(r.error); novos += (r.data || []).length; return lote();
         });
       }
-      return lote();
+      return cab.then(lote);
     },
+    desfazerImportacao: function (id) { return SB.rpc('desfazer_importacao', { p_id: Number(id) }).then(function (r) { if (r.error) throw erroBanco(r.error); return r.data; }); },
     conciliar: function (id, lancs, realizar) { return SB.rpc('conciliar_extrato', { p_extrato: id, p_lancs: lancs, p_realizar: realizar !== false }).then(function (r) { if (r.error) throw erroBanco(r.error); return true; }); },
     desconciliar: function (id) { return SB.rpc('desconciliar_extrato', { p_extrato: id }).then(function (r) { if (r.error) throw erroBanco(r.error); return true; }); },
     addTipoDoc: function (nome) { return SB.rpc('add_tipo_doc', { nome: nome }).then(function (r) { if (r.error) throw erroBanco(r.error); return r.data; }); }
@@ -540,7 +550,7 @@ function indexData() {
   d.Custos.forEach(function (c) { (d.custBy[c.pedido] = d.custBy[c.pedido] || []).push(c); });
   d.Documentos.forEach(function (x) { d.docById[x.id] = x; if (x.pedido) (d.docBy[x.pedido] = d.docBy[x.pedido] || []).push(x); });
   d.Pedidos.forEach(function (p) { p.f = fin(p); });
-  d.Extrato = d.Extrato || []; d.Conciliacoes = d.Conciliacoes || []; d.Regras = d.Regras || [];
+  d.Extrato = d.Extrato || []; d.Conciliacoes = d.Conciliacoes || []; d.Regras = d.Regras || []; d.Importacoes = d.Importacoes || [];
   d.cliIdx = {}; d.Clientes.forEach(function (c) { d.cliIdx[c.nome] = c; });
   d.fornIdx = {}; d.Fornecedores.forEach(function (f) { d.fornIdx[f.nome] = f; });
   d.lancById = {}; d.Lancamentos.forEach(function (l) { d.lancById[l.id] = l; });
@@ -1152,6 +1162,7 @@ function filtConc() {
     if (F('de') && e.data < F('de')) return false;
     if (F('ate') && e.data > F('ate')) return false;
     if (F('cat') && e.categoria !== F('cat')) return false;
+    if (F('imp') && String(e.importacao_id) !== F('imp')) return false;
     var st = F('sit');
     if (st === 'Sugestão') { if (e.situacao !== 'Pendente' || !S.sug[e.id]) return false; }
     else if (st && e.situacao !== st) return false;
@@ -1186,6 +1197,7 @@ function vConc() {
     '<select data-f="cat">' + opt(uniq(d.Extrato.map(function (e) { return e.categoria; })), F('cat'), 'Todas as categorias') + '</select>' +
     '<select data-f="banco">' + opt(uniq(d.Extrato.map(function (e) { return e.banco; })), F('banco'), 'Todos os bancos') + '</select>' +
     '<label class="small muted">de <input type="date" data-f="de" value="' + esc(F('de')) + '" style="min-width:0"></label><label class="small muted">até <input type="date" data-f="ate" value="' + esc(F('ate')) + '" style="min-width:0"></label>' +
+    (F('imp') ? '<span class="badge b-info">Importação #' + esc(F('imp')) + '</span>' : '') +
     (Object.keys(S.f.conciliacao || {}).some(function (x) { return S.f.conciliacao[x]; }) ? '<button class="btn ghost" data-act="limparFiltros" data-v="conciliacao">Limpar</button>' : '') + '</div>';
   var rows = list.slice(0, 500).map(function (e) {
     var v = Number(e.valor), ent = v >= 0, sug = e.situacao === 'Pendente' && S.sug[e.id], st;
@@ -1215,7 +1227,26 @@ function vConc() {
   if (cs.length) h += '<div class="section"><h2>Despesas e transferências por categoria <span class="c">no período filtrado · clique para ver os movimentos</span></h2><div class="card"><table><thead><tr><th>Categoria</th><th>Tipo</th><th class="n">Movimentos</th><th class="n">Saídas</th><th class="n">Entradas</th><th class="n">% das despesas</th></tr></thead><tbody>' +
     cs.map(function (c) { var x = cat[c]; return '<tr class="click" data-act="filtCat" data-c="' + esc(c) + '"><td class="code">' + esc(c) + '</td><td class="small">' + esc(x.t) + '</td><td class="n">' + x.n + '</td><td class="n db-t">' + m(x.s) + '</td><td class="n cr-t">' + m(x.e) + '</td><td class="n">' + (x.t === 'Transferência' ? '<span class="muted">–</span>' : pct(totD ? x.s / totD : NaN)) + '</td></tr>'; }).join('') +
     '</tbody><tfoot><tr><td colspan="3">Total de despesas</td><td class="n">' + m(totD) + '</td><td colspan="2"></td></tr></tfoot></table></div></div>';
+  h += histImportacoes();
   return h;
+}
+function histImportacoes() {
+  var d = S.d, imps = d.Importacoes.slice().sort(function (a, b) { return String(b.importado_em).localeCompare(String(a.importado_em)); });
+  if (!imps.length) return '';
+  var por = {}; d.Extrato.forEach(function (e) { if (!e.importacao_id) return; var x = por[e.importacao_id] = por[e.importacao_id] || { n: 0, c: 0, k: 0, p: 0 }; x.n++; if (e.situacao === 'Conciliado') x.c++; else if (e.situacao === 'Pendente') x.p++; else x.k++; });
+  var dh = function (t) { return t ? new Date(t).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : ''; };
+  var ab = !!S.histAberto;
+  var head = '<div class="section"><h2 class="click" data-act="toggleHist" style="cursor:pointer;user-select:none"><span style="display:inline-block;width:16px">' + (ab ? '▾' : '▸') + '</span>Histórico de importações <span class="c">' + imps.length + ' arquivo(s) · ' + (ab ? 'clique para fechar' : 'clique para abrir') + '</span></h2>';
+  if (!ab) return head + '</div>';
+  return head + '<div class="card"><table><thead><tr><th>Importado em</th><th>Arquivo</th><th>Período do extrato</th><th class="n">Linhas</th><th class="n">Novos</th><th class="n">Já existiam</th><th class="n">Hoje no sistema</th><th></th></tr></thead><tbody>' +
+    imps.map(function (i) {
+      var x = por[i.id] || { n: 0, c: 0, k: 0, p: 0 };
+      return '<tr class="click" data-act="filtImp" data-id="' + i.id + '"><td class="small">' + dh(i.importado_em) + '<div class="muted" style="text-transform:none">' + esc(i.importado_por) + '</div></td>' +
+        '<td class="wrap"><div class="code">' + esc(i.arquivo || '–') + '</div><div class="small muted">#' + i.id + ' · ' + esc(i.banco) + (i.ignoradas ? ' · ' + i.ignoradas + ' linha(s) ignoradas' : '') + '</div></td>' +
+        '<td class="small">' + (i.periodo_de ? dbr(i.periodo_de) + ' a ' + dbr(i.periodo_ate) : '–') + '</td><td class="n">' + i.linhas + '</td><td class="n">' + i.novos + '</td><td class="n">' + i.duplicados + '</td>' +
+        '<td class="n small">' + (i.desfeita_em ? '<span class="badge">desfeita em ' + dh(i.desfeita_em) + '</span><br>' : '') + x.n + ' mov. · ' + x.c + ' conciliados · ' + x.k + ' classificados · ' + x.p + ' pendentes</td>' +
+        '<td class="n">' + (x.p || x.n > x.c + x.k ? '<button class="btn sm ghost danger" data-act="desfazerImp" data-id="' + i.id + '" title="Remove só os movimentos desta importação que ainda não foram trabalhados">Desfazer</button>' : '') + '</td></tr>';
+    }).join('') + '</tbody></table></div><p class="small muted" style="margin-top:6px">Importar de novo nunca apaga nem altera o que já foi conciliado ou classificado: movimentos que já existem são ignorados. "Desfazer" remove só os movimentos daquele arquivo que ainda estão pendentes ou foram classificados por regra automática.</p></div>';
 }
 function regraSugerida(e) {   // padrão sugerido para a regra: a descrição sem números/códigos
   var s = String(e.descricao || '').toUpperCase().replace(/\(.*?\)/g, ' ').replace(/[^A-Z0-9.&' -]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -1491,6 +1522,14 @@ var ACT = {
   verProprio: function (ds) { go('pedidos', { cliente: ds.c, projeto: '', q: '', tipo: PROPRIO }); },
   verForn: function (ds) { go('lancamentos', { forn: ds.forn, nat: 'Pagamento' }); },
   verProj: function (ds) { go('pedidos', { cliente: ds.cli, projeto: ds.c, q: '' }); },
+  toggleHist: function () { S.histAberto = !S.histAberto; render(); if (S.histAberto) { var h = document.querySelector('[data-act=toggleHist]'); if (h) h.scrollIntoView({ block: 'start' }); } },
+  filtImp: function (ds) { S.f.conciliacao = { imp: String(ds.id) }; render(); window.scrollTo(0, 0); },
+  desfazerImp: function (ds) {
+    var b = document.querySelector('[data-act=desfazerImp][data-id="' + ds.id + '"]');
+    if (b && !b.dataset.conf) { b.dataset.conf = '1'; b.textContent = 'Confirmar?'; return; }
+    busy(true, 'Desfazendo importação…');
+    run('desfazerImportacao', ds.id).then(function (n) { busy(false); toast(n + ' movimento(s) removidos. Conciliados e classificados à mão foram mantidos.'); return load(); }).catch(function (x) { busy(false); toast(x, true); });
+  },
   filtSit: function (ds) { S.f.conciliacao = S.f.conciliacao || {}; S.f.conciliacao.sit = S.f.conciliacao.sit === ds.s ? '' : ds.s; render(); },
   filtCat: function (ds) { S.f.conciliacao = S.f.conciliacao || {}; S.f.conciliacao.cat = ds.c; S.f.conciliacao.sit = ''; render(); window.scrollTo(0, 0); },
   abrirConc: function (ds) { abrirConc(ds.id); },
@@ -1517,7 +1556,7 @@ var ACT = {
       lerArquivoExtrato(f).then(function (lido) {
         lido.linhas.forEach(function (e) { var r = CONC.regraPara(e, S.d.Regras); if (r) { e.situacao = 'Classificado'; e.tipo = r.tipo; e.categoria = r.categoria; e.auto = true; } });
         busy(true, 'Importando ' + lido.linhas.length + ' movimentos…');
-        return run('importarExtrato', lido.linhas).then(function (res) {
+        return run('importarExtrato', lido.linhas, { arquivo: f.name, ignoradas: lido.ignoradas }).then(function (res) {
           busy(false); toast(res.novos + ' movimentos novos importados' + (lido.linhas.length - res.novos ? ' · ' + (lido.linhas.length - res.novos) + ' já existiam' : '') + (lido.ignoradas ? ' · ' + lido.ignoradas + ' linhas ignoradas (falhas/canceladas)' : '') + '.');
           return load();
         });
