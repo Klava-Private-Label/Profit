@@ -384,7 +384,7 @@
     var m = (e && e.message) || String(e), c = e && e.code;
     if (c === '23505') { var k = /\((\w+)\)=\(([^)]*)\)/.exec(e.details || ''); return (k ? (ROT[k[1]] || k[1]) + ' "' + k[2] + '"' : 'Registro') + ' já existe.'; }
     if (c === '23503') return /update or delete/i.test(m) ? 'Não é possível excluir: existem registros vinculados a este cadastro.' : 'Cadastro relacionado não encontrado (cliente, fornecedor, projeto ou pedido).';
-    if (c === '23502') return 'Preencha os campos obrigatórios.';
+    if (c === '23502') { var col = /column "([^"]+)"/.exec(m); return 'Preencha os campos obrigatórios' + (col ? ' (campo ' + col[1] + ')' : '') + '.'; }
     if (c === '23514') return /realizado_com_data/.test(m) ? 'Lançamento realizado precisa de data.' : /pagamento_com_fornecedor/.test(m) ? 'Pagamento precisa do fornecedor.' : /valor/.test(m) ? 'O valor deve ser maior que zero.' : 'Valor inválido.';
     if (c === '42501' || /row-level security/i.test(m)) return 'Sem permissão. Seu acesso pode ter sido bloqueado; entre de novo.';
     return m;
@@ -464,20 +464,24 @@
     importarExtrato: function (linhas, info) {
       info = info || {};
       var cols = COLS.Extrato.filter(function (k) { return ['id', 'decidido_por', 'decidido_em', 'importado_em', 'importado_por', 'importacao_id'].indexOf(k) < 0; });
-      var rows = linhas.map(function (r) { var o = {}; cols.forEach(function (k) { if (r[k] !== undefined) o[k] = r[k] === '' ? null : r[k]; }); return o; });
+      // todas as linhas com as mesmas colunas: no envio em lote, coluna ausente vira nulo (e situacao/auto não aceitam nulo)
+      var rows = linhas.map(function (r) {
+        var o = {}; cols.forEach(function (k) { o[k] = (r[k] === undefined || r[k] === '') ? null : r[k]; });
+        o.banco = o.banco || 'MERCURY'; o.situacao = o.situacao || 'Pendente'; o.auto = !!o.auto; return o;
+      });
       var datas = rows.map(function (r) { return r.data; }).filter(String).sort();
-      var novos = 0, i = 0, impId = null;
+      var novos = 0, i = 0, impId = null, ids = {};
       // registra a importação no histórico (se a tabela ainda não existir, importa assim mesmo)
       var cab = SB.from('importacoes').insert({ banco: (rows[0] && rows[0].banco) || 'MERCURY', arquivo: info.arquivo || null, periodo_de: datas[0] || null, periodo_ate: datas[datas.length - 1] || null,
         linhas: rows.length, ignoradas: info.ignoradas || 0 }).select('id').single().then(function (r) { if (!r.error) impId = r.data.id; }, function () {});
       function lote() {
         if (i >= rows.length) {
-          var fim = { novos: novos, total: rows.length };
+          var fim = { novos: novos, total: rows.length, ids: ids };
           return impId ? SB.from('importacoes').update({ novos: novos, duplicados: rows.length - novos }).eq('id', impId).then(function () { return fim; }) : Promise.resolve(fim);
         }
         var parte = rows.slice(i, i + 300).map(function (r) { return impId ? Object.assign({ importacao_id: impId }, r) : r; }); i += 300;
-        return SB.from('extrato').upsert(parte, { onConflict: 'chave', ignoreDuplicates: true }).select('id').then(function (r) {
-          if (r.error) throw erroBanco(r.error); novos += (r.data || []).length; return lote();
+        return SB.from('extrato').upsert(parte, { onConflict: 'chave', ignoreDuplicates: true }).select('id, chave').then(function (r) {
+          if (r.error) throw erroBanco(r.error); (r.data || []).forEach(function (x) { ids[x.chave] = x.id; }); novos += (r.data || []).length; return lote();
         });
       }
       return cab.then(lote);
@@ -1340,6 +1344,76 @@ function abrirConc(id) {
       depois: function (saved) { return conciliarComo(e, [saved.id], false); } });
   };
 }
+/** Prévia do arquivo: nada é gravado até o usuário decidir. Mostra o que é novo, o que já existe e as propostas (regras e sugestões). */
+function previaExtrato(lido, arquivo) {
+  var d = S.d, exist = {}; d.Extrato.forEach(function (e) { exist[e.chave] = 1; });
+  var novos = lido.linhas.filter(function (e) { return !exist[e.chave]; }), dup = lido.linhas.length - novos.length;
+  // simula as sugestões como se os novos já estivessem no sistema (ids provisórios)
+  novos.forEach(function (e, i) { e._tmp = 'NOVO-' + (i + 1); });
+  var sim = Object.assign({}, d, { Extrato: novos.map(function (e) { var r = CONC.regraPara(e, d.Regras); return Object.assign({}, e, { id: e._tmp, situacao: r ? 'Classificado' : 'Pendente' }); }) });
+  var sug = CONC.sugerir(sim);
+  var prop = {};
+  novos.forEach(function (e) {
+    var r = CONC.regraPara(e, d.Regras), s = sug[e._tmp];
+    if (r) prop[e._tmp] = { k: 'regra', r: r, marcado: true };
+    else if (s && s.conf !== 'baixa') prop[e._tmp] = { k: 'sug', s: s, marcado: s.conf === 'alta' };
+    else if (s) prop[e._tmp] = { k: 'baixa', s: s, marcado: false };
+  });
+  var datas = lido.linhas.map(function (e) { return e.data; }).sort(), ent = 0, sai = 0;
+  novos.forEach(function (e) { if (e.valor >= 0) ent += e.valor; else sai += -e.valor; });
+  var cnt = function (k, conf) { return novos.filter(function (e) { var p = prop[e._tmp]; return p && p.k === k && (!conf || p.s.conf === conf); }).length; };
+  var h = '<header><span class="grow">Prévia da importação · ' + esc(arquivo) + '</span><button class="btn ghost" data-x>✕</button></header><div class="content">' +
+    '<div class="grid kpis row" style="--n:4;margin-bottom:12px">' +
+    '<div class="card kpi"><div class="l">Período do arquivo</div><div class="v" style="font-size:15px">' + (datas.length ? dbr(datas[0]) + ' a ' + dbr(datas[datas.length - 1]) : '–') + '</div><div class="s">' + lido.linhas.length + ' movimentos' + (lido.ignoradas ? ' · ' + lido.ignoradas + ' ignorados (falha/cancelado)' : '') + '</div></div>' +
+    '<div class="card kpi"><div class="l">Novos</div><div class="v">' + novos.length + '</div><div class="s"><span class="cr-t">+' + mt(ent) + '</span> · <span class="db-t">−' + mt(sai) + '</span></div></div>' +
+    '<div class="card kpi"><div class="l">Já existiam no sistema</div><div class="v">' + dup + '</div><div class="s">ficam como estão</div></div>' +
+    '<div class="card kpi"><div class="l">Propostas do sistema</div><div class="v">' + (cnt('regra') + cnt('sug')) + '</div><div class="s">' + cnt('regra') + ' por regra · ' + cnt('sug', 'alta') + ' alta · ' + cnt('sug', 'média') + ' média</div></div></div>';
+  if (!novos.length) {
+    h += '<p>Todos os movimentos deste arquivo já estão no sistema. Nada a importar.</p></div><footer><button class="btn pri" data-x>Fechar</button></footer>';
+  } else {
+    h += '<div class="filters" style="margin-bottom:6px"><span class="small muted">Marcar:</span><button class="btn sm" data-m="regra">regras</button><button class="btn sm" data-m="alta">sugestões alta</button><button class="btn sm" data-m="média">sugestões média</button><button class="btn sm" data-m="todos">todas</button><button class="btn sm ghost" data-m="nenhum">nenhuma</button></div>' +
+      '<div class="cand" style="max-height:52vh"><table><thead><tr><th></th><th>Data</th><th>Descrição no banco</th><th class="n">Entrada</th><th class="n">Saída</th><th>Proposta</th></tr></thead><tbody>' +
+      novos.map(function (e) {
+        var p = prop[e._tmp], v = e.valor, txt;
+        if (!p) txt = '<span class="muted small">Sem proposta — fica pendente</span>';
+        else if (p.k === 'regra') txt = '<span class="badge ' + (p.r.tipo === 'Transferência' ? '' : 'b-info') + '">' + esc(p.r.tipo) + '</span> <b class="small">' + esc(p.r.categoria) + '</b> <span class="small muted">· regra "' + esc(p.r.padrao) + '"</span>';
+        else txt = '<span class="badge ' + (p.k === 'baixa' ? 'b-warn' : 'b-pos') + '">Sugestão ' + esc(p.s.conf) + '</span> <span class="small">' + p.s.ids.map(function (id) { var l = d.lancById[id]; return esc(l.pedido) + ' (' + mt(l.valor) + ')'; }).join(' + ') + '</span>' + (p.k === 'baixa' ? '<div class="small muted">' + esc(p.s.motivo) + ' — revise depois na tela</div>' : '');
+        return '<tr class="' + (v >= 0 ? 'cr' : 'db') + '"><td>' + (p && p.k !== 'baixa' ? '<input type="checkbox" class="pv" value="' + e._tmp + '"' + (p.marcado ? ' checked' : '') + ' data-k="' + (p.k === 'regra' ? 'regra' : p.s.conf) + '">' : '') + '</td><td class="small">' + dbr(e.data) + '</td>' +
+          '<td class="wrap"><div class="code">' + esc(e.descricao) + '</div><div class="small muted">' + esc(extInfo(e)) + '</div></td><td class="n">' + (v >= 0 ? m(v) : '') + '</td><td class="n">' + (v < 0 ? m(-v) : '') + '</td><td class="wrap">' + txt + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<p class="small muted" style="margin-top:8px">Nada foi gravado ainda. <b>Conciliar</b> importa todos os movimentos novos e aplica só as propostas marcadas; o resto fica pendente para você resolver na tela. <b>Só importar</b> grava tudo como pendente.</p><div class="err" id="perr"></div></div>' +
+      '<footer><button class="btn" data-x style="margin-right:auto">Cancelar</button><button class="btn" id="pso">Só importar</button><button class="btn pri" id="pok">Conciliar</button></footer>';
+  }
+  var box = $('#mbox'); box.innerHTML = h; box.classList.add('wide'); $('#modal').classList.add('on');
+  $$('[data-x]', box).forEach(function (b) { b.onclick = closeModal; });
+  if (!novos.length) return;
+  var ok = $('#pok', box), so = $('#pso', box);
+  var conta = function () { var n = $$('.pv:checked', box).length; ok.textContent = 'Conciliar' + (n ? ' (' + n + ' marcados)' : ''); };
+  $$('.pv', box).forEach(function (c) { c.onchange = conta; }); conta();
+  $$('[data-m]', box).forEach(function (b) { b.onclick = function () { var m2 = b.dataset.m; $$('.pv', box).forEach(function (c) { c.checked = m2 === 'todos' ? true : m2 === 'nenhum' ? false : (c.dataset.k === m2 ? true : c.checked); }); conta(); }; });
+  var executar = function (aplicar) {
+    var marc = {}; if (aplicar) $$('.pv:checked', box).forEach(function (c) { marc[c.value] = 1; });
+    ok.disabled = so.disabled = true; ok.textContent = 'Gravando…';
+    var linhas = novos.map(function (e) {
+      var o = Object.assign({}, e), p = prop[e._tmp]; delete o._tmp;
+      if (marc[e._tmp] && p.k === 'regra') { o.situacao = 'Classificado'; o.tipo = p.r.tipo; o.categoria = p.r.categoria; o.auto = true; }
+      return o;
+    });
+    run('importarExtrato', linhas, { arquivo: arquivo, ignoradas: lido.ignoradas }).then(function (res) {
+      var ids = res.ids || {}, fila = novos.filter(function (e) { return marc[e._tmp] && prop[e._tmp].k === 'sug' && ids[e.chave]; }), n = 0, falhas = 0;
+      return fila.reduce(function (pr, e) {
+        return pr.then(function () { ok.textContent = 'Conciliando ' + (++n) + ' de ' + fila.length + '…'; return conciliarComo(Object.assign({}, e, { id: ids[e.chave] }), prop[e._tmp].s.ids, true).catch(function () { falhas++; }); });
+      }, Promise.resolve()).then(function () {
+        closeModal();
+        var nr = Object.keys(marc).filter(function (k) { return prop[k].k === 'regra'; }).length;
+        toast(res.novos + ' movimentos importados' + (aplicar ? ' · ' + nr + ' classificados por regra · ' + (fila.length - falhas) + ' conciliados' : ' como pendentes') + (falhas ? ' · ' + falhas + ' não conciliaram (ficaram pendentes)' : '') + '.');
+        return load();
+      });
+    }).catch(function (x) { var el = $('#perr', box); el.style.display = 'block'; el.textContent = x; ok.disabled = so.disabled = false; conta(); });
+  };
+  ok.onclick = function () { executar(true); };
+  so.onclick = function () { executar(false); };
+}
 function lerArquivoExtrato(file) {
   return new Promise(function (res, rej) {
     if (!window.XLSX) { rej('Não consegui carregar o leitor de planilhas. Verifique a internet e recarregue a página.'); return; }
@@ -1553,14 +1627,7 @@ var ACT = {
     inp.onchange = function () {
       var f = inp.files[0]; inp.value = ''; if (!f) return;
       busy(true, 'Lendo ' + f.name + '…');
-      lerArquivoExtrato(f).then(function (lido) {
-        lido.linhas.forEach(function (e) { var r = CONC.regraPara(e, S.d.Regras); if (r) { e.situacao = 'Classificado'; e.tipo = r.tipo; e.categoria = r.categoria; e.auto = true; } });
-        busy(true, 'Importando ' + lido.linhas.length + ' movimentos…');
-        return run('importarExtrato', lido.linhas, { arquivo: f.name, ignoradas: lido.ignoradas }).then(function (res) {
-          busy(false); toast(res.novos + ' movimentos novos importados' + (lido.linhas.length - res.novos ? ' · ' + (lido.linhas.length - res.novos) + ' já existiam' : '') + (lido.ignoradas ? ' · ' + lido.ignoradas + ' linhas ignoradas (falhas/canceladas)' : '') + '.');
-          return load();
-        });
-      }).catch(function (x) { busy(false); toast(x, true); });
+      lerArquivoExtrato(f).then(function (lido) { busy(false); previaExtrato(lido, f.name); }).catch(function (x) { busy(false); toast(x, true); });
     };
     inp.click();
   },
