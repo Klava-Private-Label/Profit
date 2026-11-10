@@ -652,6 +652,19 @@ function go(view, filters) { S.view = view; S.f[view] = Object.assign({}, S.f[vi
 function fv(view, k, def) { return (S.f[view] || {})[k] !== undefined ? S.f[view][k] : (def || ''); }
 function bindFilters(view) {
   $$('[data-f]').forEach(function (el) {
+    if (el.type === 'date') {
+      var aplica = function () {
+        var v = el.value; if (v && !(Number(v.slice(0, 4)) >= 1990 && Number(v.slice(0, 4)) <= 2100)) return;   // ano ainda sendo digitado
+        S.f[view] = S.f[view] || {}; if ((S.f[view][el.dataset.f] || '') === v) return;
+        var foco = document.activeElement === el, id = el.dataset.f;
+        S.f[view][el.dataset.f] = v; render();
+        if (foco) { var n = $('[data-f="' + id + '"]'); if (n) n.focus(); }
+      };
+      el.oninput = el.onchange = function () { clearTimeout(el._t); el._t = setTimeout(aplica, 900); };
+      el.onblur = function () { clearTimeout(el._t); aplica(); };
+      el.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); aplica(); } };
+      return;
+    }
     el.oninput = el.onchange = function () {
       S.f[view] = S.f[view] || {}; S.f[view][el.dataset.f] = el.value;
       var pos = el.selectionStart; var id = el.dataset.f;
@@ -1115,10 +1128,12 @@ var CONC = (function () {
     return out;
   }
   /** Regra de classificação que se aplica ao movimento (padrão contido na descrição). */
+  // texto normalizado: sem acento, só letras/números separados por um espaço ("1/WETRUST US LLC" -> " 1 WETRUST US LLC ")
+  function norm(s) { return ' ' + String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim() + ' '; }
   function regraPara(e, regras) {
-    var txt = String([e.descricao, e.detalhe].join(' ')).toUpperCase();
-    var rs = (regras || []).slice().sort(function (a, b) { return b.padrao.length - a.padrao.length; });
-    for (var i = 0; i < rs.length; i++) if (rs[i].padrao && txt.indexOf(rs[i].padrao.toUpperCase()) >= 0) return rs[i];
+    var txt = norm([e.descricao, e.detalhe].join(' '));
+    var rs = (regras || []).filter(function (r) { return norm(r.padrao).trim(); }).sort(function (a, b) { return norm(b.padrao).length - norm(a.padrao).length; });
+    for (var i = 0; i < rs.length; i++) if (txt.indexOf(norm(rs[i].padrao)) >= 0) return rs[i];
     return null;
   }
   /** Lê o extrato da Mercury (XLSX ou CSV exportado do painel). Recebe as linhas como objetos {cabeçalho: valor}. */
@@ -1150,7 +1165,7 @@ var CONC = (function () {
     });
     return { linhas: out, ignoradas: ign };
   }
-  return { sugerir: sugerir, regraPara: regraPara, lerMercury: lerMercury, tokens: tokens, bate: bate };
+  return { sugerir: sugerir, regraPara: regraPara, norm: norm, lerMercury: lerMercury, tokens: tokens, bate: bate };
 })();
 /* MOTOR-FIM */
 
@@ -1204,7 +1219,9 @@ function vConc() {
     if (e.situacao === 'Pendente' && S.sug[e.id]) { k.sug++; if (S.sug[e.id].conf === 'alta') k.alta++; }
   });
   var card = function (sit, lb, v, sub) { var on = F('sit') === sit; return '<div class="card kpi click' + (on ? ' on' : '') + '" data-act="filtSit" data-s="' + sit + '"><div class="l">' + lb + '</div><div class="v">' + v + '</div><div class="s">' + sub + '</div></div>'; };
+  var nRegra = d.Extrato.filter(function (e) { return e.situacao === 'Pendente' && CONC.regraPara(e, d.Regras); }).length;
   var h = '<div class="top"><h1>Conciliação bancária</h1><span class="muted">' + list.length + ' movimentos</span><div class="grow"></div>' +
+    (nRegra ? '<button class="btn" data-act="aplicarRegras" title="Classifica os pendentes que batem com alguma regra">⚙ Aplicar regras (' + nRegra + ')</button>' : '') +
     (k.alta ? '<button class="btn" data-act="aceitarAltas">✓ Aceitar ' + k.alta + ' sugest' + (k.alta === 1 ? 'ão' : 'ões') + ' de alta confiança</button>' : '') +
     '<button class="btn pri" data-act="importarExtrato">⤒ Importar extrato</button><input type="file" id="extFile" accept=".xlsx,.xls,.csv" style="display:none"></div>';
   if (!d.Extrato.length) return h + '<div class="card" style="padding:28px;text-align:center"><p style="font-size:15px">Nenhum extrato importado ainda.</p><p class="muted">Exporte o extrato da Mercury (Transactions → Export, em Excel ou CSV) e clique em <b>Importar extrato</b>. Movimentos repetidos são ignorados, então pode importar o mesmo período mais de uma vez.</p></div>';
@@ -1252,8 +1269,19 @@ function vConc() {
   if (cs.length) h += '<div class="section"><h2>Despesas e transferências por categoria <span class="c">no período filtrado · clique para ver os movimentos</span></h2><div class="card"><table><thead><tr><th>Categoria</th><th>Tipo</th><th class="n">Movimentos</th><th class="n">Saídas</th><th class="n">Entradas</th><th class="n">% das despesas</th></tr></thead><tbody>' +
     cs.map(function (c) { var x = cat[c]; return '<tr class="click" data-act="filtCat" data-c="' + esc(c) + '"><td class="code">' + esc(c) + '</td><td class="small">' + esc(x.t) + '</td><td class="n">' + x.n + '</td><td class="n db-t">' + m(x.s) + '</td><td class="n cr-t">' + m(x.e) + '</td><td class="n">' + (x.t === 'Transferência' ? '<span class="muted">–</span>' : pct(totD ? x.s / totD : NaN)) + '</td></tr>'; }).join('') +
     '</tbody><tfoot><tr><td colspan="3">Total de despesas</td><td class="n">' + m(totD) + '</td><td colspan="2"></td></tr></tfoot></table></div></div>';
+  h += listaRegras();
   h += histImportacoes();
   return h;
+}
+function listaRegras() {
+  var d = S.d, rs = d.Regras.slice().sort(function (a, b) { return a.categoria.localeCompare(b.categoria) || a.padrao.localeCompare(b.padrao); }), ab = !!S.regrasAbertas;
+  var head = '<div class="section"><h2 class="click" data-act="toggleRegras" style="cursor:pointer;user-select:none"><span style="display:inline-block;width:16px">' + (ab ? '▾' : '▸') + '</span>Regras de classificação <span class="c">' + rs.length + ' regra(s) · ' + (ab ? 'clique para fechar' : 'clique para abrir') + '</span></h2>';
+  if (!ab) return head + '</div>';
+  var uso = function (r) { var c = { p: 0, t: 0 }; d.Extrato.forEach(function (e) { if (CONC.regraPara(e, [r])) { c.t++; if (e.situacao === 'Pendente') c.p++; } }); return c; };
+  return head + '<div class="card"><table><thead><tr><th>Quando a descrição contém</th><th>Categoria</th><th>Tipo</th><th class="n">Movimentos que batem</th><th>Criada por</th><th></th></tr></thead><tbody>' +
+    (rs.length ? rs.map(function (r) { var u = uso(r); return '<tr><td class="code">' + esc(r.padrao) + '</td><td class="small">' + esc(r.categoria) + '</td><td class="small">' + esc(r.tipo) + '</td><td class="n small">' + u.t + (u.p ? ' · <span class="neg">' + u.p + ' pendente(s)</span>' : '') + '</td><td class="small muted" style="text-transform:none">' + esc(r.criado_por || 'padrão do sistema') + '</td><td class="n"><button class="btn sm ghost danger" data-act="delRegra" data-id="' + r.id + '" title="Excluir a regra (os movimentos já classificados continuam como estão)">Excluir</button></td></tr>'; }).join('')
+      : '<tr><td colspan="6" class="empty">Nenhuma regra.</td></tr>') +
+    '</tbody></table></div><p class="small muted" style="margin-top:6px">As regras propõem a categoria na prévia da importação e pelo botão "Aplicar regras". Excluir uma regra não muda o que já foi classificado.</p></div>';
 }
 function histImportacoes() {
   var d = S.d, imps = d.Importacoes.slice().sort(function (a, b) { return String(b.importado_em).localeCompare(String(a.importado_em)); });
@@ -1273,9 +1301,9 @@ function histImportacoes() {
         '<td class="n">' + (x.p || x.n > x.c + x.k ? '<button class="btn sm ghost danger" data-act="desfazerImp" data-id="' + i.id + '" title="Remove só os movimentos desta importação que ainda não foram trabalhados">Desfazer</button>' : '') + '</td></tr>';
     }).join('') + '</tbody></table></div><p class="small muted" style="margin-top:6px">Importar de novo nunca apaga nem altera o que já foi conciliado ou classificado: movimentos que já existem são ignorados. "Desfazer" remove só os movimentos daquele arquivo que ainda estão pendentes ou foram classificados por regra automática.</p></div>';
 }
-function regraSugerida(e) {   // padrão sugerido para a regra: a descrição sem números/códigos
-  var s = String(e.descricao || '').toUpperCase().replace(/\(.*?\)/g, ' ').replace(/[^A-Z0-9.&' -]/g, ' ').replace(/\s+/g, ' ').trim();
-  return s.split(' ').slice(0, 4).join(' ');
+function regraSugerida(e) {   // padrão sugerido para a regra: as primeiras palavras da descrição, sem números/códigos soltos
+  var t = CONC.norm(String(e.descricao || '').replace(/\(.*?\)/g, ' ')).trim().split(' ').filter(function (w) { return w && !/^\d+$/.test(w); });
+  return t.slice(0, 4).join(' ');
 }
 /** Depois de conciliar: guarda o nome do banco no cadastro ("nome no extrato") para casar sozinho da próxima vez. */
 function aprenderNomes(e, ids) {
@@ -1330,7 +1358,7 @@ function abrirConc(id) {
   };
   $$('.cb', box).forEach(function (c) { c.onchange = conta; }); conta();
   $('#cq', box).oninput = function () { var q = this.value.toLowerCase(); $$('.cand tbody tr', box).forEach(function (tr) { tr.style.display = !q || tr.dataset.busca.indexOf(q) >= 0 || tr.querySelector('.cb').checked ? '' : 'none'; }); };
-  var pad = $('#kpad', box), regh = function () { var p = pad.value.trim().toUpperCase(); var n = p ? S.d.Extrato.filter(function (x) { return x.situacao === 'Pendente' && x.id !== e.id && ([x.descricao, x.detalhe].join(' ').toUpperCase().indexOf(p) >= 0); }).length : 0; $('#kregh', box).textContent = n ? 'Também vai classificar ' + n + ' outro(s) movimento(s) pendente(s) com esse texto.' : ''; };
+  var pad = $('#kpad', box), regh = function () { var p = pad.value.trim(); var n = p ? S.d.Extrato.filter(function (x) { return x.situacao === 'Pendente' && x.id !== e.id && CONC.regraPara(x, [{ padrao: p }]); }).length : 0; $('#kregh', box).textContent = p ? (n ? 'Também vai classificar ' + n + ' outro(s) movimento(s) pendente(s) com esse texto.' : 'Nenhum outro movimento pendente tem esse texto.') : ''; };
   pad.oninput = regh; regh();
   $('#kcat', box).onchange = function () { $('#ktipo', box).value = tipoDaCat(this.value); };
   $('#cok', box).onclick = function () {
@@ -1348,7 +1376,7 @@ function abrirConc(id) {
     if ($('#kreg', box).checked && pad.value.trim()) {
       var padrao = pad.value.trim().toUpperCase();
       p = p.then(function () { return save('Regras', { padrao: padrao, tipo: t, categoria: c }).catch(function () {}); }).then(function () {
-        var outros = S.d.Extrato.filter(function (x) { return x.situacao === 'Pendente' && x.id !== e.id && [x.descricao, x.detalhe].join(' ').toUpperCase().indexOf(padrao) >= 0; });
+        var outros = S.d.Extrato.filter(function (x) { return x.situacao === 'Pendente' && x.id !== e.id && CONC.regraPara(x, [{ padrao: padrao }]); });
         return outros.reduce(function (q, x) { return q.then(function () { return save('Extrato', { id: x.id, situacao: 'Classificado', tipo: t, categoria: c, auto: true }); }); }, Promise.resolve());
       });
     }
@@ -1625,6 +1653,21 @@ var ACT = {
   verProprio: function (ds) { go('pedidos', { cliente: ds.c, projeto: '', q: '', tipo: PROPRIO }); },
   verForn: function (ds) { go('lancamentos', { forn: ds.forn, nat: 'Pagamento' }); },
   verProj: function (ds) { go('pedidos', { cliente: ds.cli, projeto: ds.c, q: '' }); },
+  toggleRegras: function () { S.regrasAbertas = !S.regrasAbertas; render(); },
+  delRegra: function (ds) {
+    var b = document.querySelector('[data-act=delRegra][data-id="' + ds.id + '"]');
+    if (b && !b.dataset.conf) { b.dataset.conf = '1'; b.textContent = 'Confirmar?'; return; }
+    busy(true, 'Excluindo regra…');
+    run('deleteRecord', 'Regras', ds.id).then(function () { busy(false); toast('Regra excluída.'); return load(); }).catch(function (x) { busy(false); toast(x, true); });
+  },
+  aplicarRegras: function () {
+    var alvo = S.d.Extrato.filter(function (e) { return e.situacao === 'Pendente' && CONC.regraPara(e, S.d.Regras); }), n = 0;
+    var b = document.querySelector('[data-act=aplicarRegras]');
+    if (b && !b.dataset.conf) { b.dataset.conf = '1'; b.textContent = 'Classificar ' + alvo.length + ' pendente(s)? Clique de novo'; return; }
+    busy(true, 'Aplicando regras…');
+    alvo.reduce(function (p, e) { var r = CONC.regraPara(e, S.d.Regras); return p.then(function () { busy(true, 'Aplicando regras ' + (++n) + ' de ' + alvo.length + '…'); return save('Extrato', { id: e.id, situacao: 'Classificado', tipo: r.tipo, categoria: r.categoria, auto: true }); }); }, Promise.resolve())
+      .then(function () { busy(false); toast(alvo.length + ' movimento(s) classificados pelas regras.'); return load(); }).catch(function (x) { busy(false); toast(x, true); load(); });
+  },
   toggleHist: function () { S.histAberto = !S.histAberto; render(); if (S.histAberto) { var h = document.querySelector('[data-act=toggleHist]'); if (h) h.scrollIntoView({ block: 'start' }); } },
   editSaldo: function (ds) {
     var b = ds.b || 'MERCURY', x = S.d.Saldos.filter(function (s2) { return s2.id === b; })[0] || { id: b, data: '2026-01-01', valor: '' };
