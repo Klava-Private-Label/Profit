@@ -1799,6 +1799,7 @@ var ACT = {
       { k: 'natureza', label: 'Natureza', type: 'select', options: ['Recebimento', 'Pagamento'], req: 1 },
       { k: 'parcela', label: 'Parcela', type: 'select', options: S.d.config.parcelas, req: 1 },
       { k: 'fornecedor', label: 'Fornecedor (pagamentos)', type: 'select', options: fornOpts(), blank: '—' },
+      { k: 'custo_id', label: 'Produto / orçamento', type: 'select', options: [], blank: '—', hint: 'Qual item do orçamento este pagamento quita (ex.: ALMOFADA DE PESCOÇO).' },
       { k: 'valor', label: 'Valor (USD)', type: 'number', req: 1 },
       { k: 'situacao', label: 'Situação', type: 'select', options: ['Realizado', 'Previsto'], req: 1, hint: 'Previsto = parcela programada (a data pode ficar em branco).' },
       { k: 'banco', label: 'Banco', type: 'select', options: bancos(), blank: 'Selecione…', req: 1 },
@@ -1810,15 +1811,27 @@ var ACT = {
       after: function (box) {
         bindFileBox(box);
         var nat = $('[name=natureza]', box), fo = $('[name=fornecedor]', box), ped = $('[name=pedido]', box);
+        var cu = $('[name=custo_id]', box), curCu = l.custo_id || '';
+        var fillCu = function () {
+          var ls = (S.d.custBy[ped.value] || []).filter(function (c) { return c.fornecedor === fo.value; });
+          var keep = cu.value || curCu;
+          cu.innerHTML = opt(ls.map(function (c) { return { v: c.id, t: (c.descricao || c.id) + ' · ' + mt(c.custo_total) }; }), keep, ls.length > 1 ? '— dividir entre os produtos do fornecedor —' : '—');
+          if (ls.length === 1) cu.value = ls[0].id;
+          else if (!ls.some(function (c) { return c.id === keep; })) cu.value = '';
+          var on = nat.value === 'Pagamento' && ls.length > 0;
+          cu.closest('div').style.display = on ? '' : 'none';
+          if (!on) cu.value = '';
+        };
         var sync = function () {
           fo.closest('div').style.opacity = nat.value === 'Pagamento' ? 1 : .45;
           if (nat.value === 'Pagamento' && !fo.value && ped.value) { var cs = S.d.custBy[ped.value] || []; if (cs.length === 1) fo.value = cs[0].fornecedor; }
+          fillCu();
         };
-        nat.onchange = sync; bindCliPed(box, 'Selecione…', sync); sync();
+        nat.onchange = sync; fo.addEventListener('change', fillCu); bindCliPed(box, 'Selecione…', sync); sync();
       },
       onSave: function (v, box) {
         if (l.id) v.id = l.id;
-        if (v.natureza !== 'Pagamento') { v.fornecedor = ''; if (l.custo_id) v.custo_id = ''; }
+        if (v.natureza !== 'Pagamento') { v.fornecedor = ''; v.custo_id = ''; }
         if (v.situacao === 'Realizado' && !v.data) return Promise.reject('Informe a data do lançamento realizado.');
         if (v.natureza === 'Recebimento' && isProp(S.d.ped[v.pedido])) return Promise.reject('O pedido ' + v.pedido + ' é PEDIDO PRÓPRIO: não tem recebimentos, só pagamentos.');
         var files = box._files || [];
