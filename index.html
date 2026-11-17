@@ -1346,7 +1346,7 @@ function abrirConc(id) {
     '<div><label>Tipo</label><select id="ktipo">' + opt(['Despesa', 'Transferência'], e.tipo && e.tipo !== 'Operação' ? e.tipo : (regra ? regra.tipo : 'Despesa')) + '</select></div>' +
     '<div><label>Observação</label><input id="kobs" value="' + esc(e.obs || '') + '" placeholder="ex.: salário outubro, passagem SP–Shenzhen"></div>' +
     '<div class="full"><label><input type="checkbox" id="kreg"> Criar regra: sempre classificar movimentos que contenham</label><input id="kpad" value="' + esc(regraSugerida(e)) + '" style="margin-top:4px"><div class="hint" id="kregh"></div></div></div>' +
-    '<div class="err" id="cerr"></div></div><footer><button class="btn danger" id="kign" style="margin-right:auto">Ignorar movimento</button><button class="btn" data-x>Cancelar</button><button class="btn pri" id="kok">Classificar</button></footer>';
+    '<div class="err" id="cerr"></div></div><footer><button class="btn danger" id="kdel" title="Apaga o movimento do sistema (use para duplicados)">Excluir</button><button class="btn danger" id="kign" style="margin-right:auto">Ignorar movimento</button><button class="btn" data-x>Cancelar</button><button class="btn pri" id="kok">Classificar</button></footer>';
   var box = $('#mbox'); box.innerHTML = h; box.classList.add('wide'); $('#modal').classList.add('on');
   $$('[data-x]', box).forEach(function (b) { b.onclick = closeModal; });
   var err = function (t) { var x = $('#cerr', box); x.style.display = 'block'; x.textContent = t; };
@@ -1382,6 +1382,10 @@ function abrirConc(id) {
     }
     p.then(function () { closeModal(); toast('Movimento classificado.'); return load(); }).catch(function (x) { err(x); b.disabled = false; b.textContent = 'Classificar'; });
   };
+  $('#kdel', box).onclick = function () {
+    var b = this; if (!b.dataset.conf) { b.dataset.conf = '1'; b.textContent = 'Confirmar exclusão?'; return; }
+    run('deleteRecord', 'Extrato', e.id).then(function () { closeModal(); toast('Movimento excluído.'); return load(); }).catch(function (x) { err(x); });
+  };
   $('#kign', box).onclick = function () {
     var b = this; if (!b.dataset.conf) { b.dataset.conf = '1'; b.textContent = 'Confirmar: ignorar?'; return; }
     (atuais.length ? run('desconciliar', e.id) : Promise.resolve()).then(function () { return save('Extrato', { id: e.id, situacao: 'Ignorado', obs: $('#kobs', box).value.trim().toUpperCase() }); })
@@ -1396,7 +1400,17 @@ function abrirConc(id) {
 /** Prévia do arquivo: nada é gravado até o usuário decidir. Mostra o que é novo, o que já existe e as propostas (regras e sugestões). */
 function previaExtrato(lido, arquivo) {
   var d = S.d, exist = {}; d.Extrato.forEach(function (e) { exist[e.chave] = 1; });
-  var novos = lido.linhas.filter(function (e) { return !exist[e.chave]; }), dup = lido.linhas.length - novos.length;
+  var banco = (lido.linhas[0] || {}).banco || 'MERCURY', ab = d.Saldos.filter(function (x) { return x.id === banco; })[0];
+  // movimentos anteriores ao saldo de abertura não entram (já estão dentro do saldo de abertura)
+  var antes = ab ? lido.linhas.filter(function (e) { return e.data < ab.data; }) : [];
+  var linhas = ab ? lido.linhas.filter(function (e) { return e.data >= ab.data; }) : lido.linhas;
+  var novos = linhas.filter(function (e) { return !exist[e.chave]; }), dup = linhas.length - novos.length;
+  // conferência: o que está no sistema dentro do período do arquivo e NÃO está no arquivo (duplicado / removido no banco)
+  var dts = linhas.map(function (e) { return e.data; }).sort(), ini = dts[0], fim = dts[dts.length - 1], noArq = {};
+  linhas.forEach(function (e) { noArq[e.chave] = 1; });
+  var extras = ini ? d.Extrato.filter(function (e) { return e.banco === banco && e.data >= ini && e.data <= fim && !noArq[e.chave]; }) : [];
+  var netArq = linhas.reduce(function (a, e) { return a + e.valor; }, 0);
+  var netSis = d.Extrato.filter(function (e) { return e.banco === banco && ini && e.data >= ini && e.data <= fim; }).reduce(function (a, e) { return a + Number(e.valor); }, 0) + novos.reduce(function (a, e) { return a + e.valor; }, 0);
   // simula as sugestões como se os novos já estivessem no sistema (ids provisórios)
   novos.forEach(function (e, i) { e._tmp = 'NOVO-' + (i + 1); });
   var sim = Object.assign({}, d, { Extrato: novos.map(function (e) { var r = CONC.regraPara(e, d.Regras); return Object.assign({}, e, { id: e._tmp, situacao: r ? 'Classificado' : 'Pendente' }); }) });
@@ -1408,17 +1422,23 @@ function previaExtrato(lido, arquivo) {
     else if (s && s.conf !== 'baixa') prop[e._tmp] = { k: 'sug', s: s, marcado: s.conf === 'alta' };
     else if (s) prop[e._tmp] = { k: 'baixa', s: s, marcado: false };
   });
-  var datas = lido.linhas.map(function (e) { return e.data; }).sort(), ent = 0, sai = 0;
+  var datas = linhas.map(function (e) { return e.data; }).sort(), ent = 0, sai = 0;
   novos.forEach(function (e) { if (e.valor >= 0) ent += e.valor; else sai += -e.valor; });
   var cnt = function (k, conf) { return novos.filter(function (e) { var p = prop[e._tmp]; return p && p.k === k && (!conf || p.s.conf === conf); }).length; };
   var h = '<header><span class="grow">Prévia da importação · ' + esc(arquivo) + '</span><button class="btn ghost" data-x>✕</button></header><div class="content">' +
-    '<div class="grid kpis row" style="--n:4;margin-bottom:12px">' +
-    '<div class="card kpi"><div class="l">Período do arquivo</div><div class="v" style="font-size:15px">' + (datas.length ? dbr(datas[0]) + ' a ' + dbr(datas[datas.length - 1]) : '–') + '</div><div class="s">' + lido.linhas.length + ' movimentos' + (lido.ignoradas ? ' · ' + lido.ignoradas + ' ignorados (falha/cancelado)' : '') + '</div></div>' +
+    '<div class="grid kpis row" style="--n:5;margin-bottom:12px">' +
+    '<div class="card kpi"><div class="l">Período do arquivo</div><div class="v" style="font-size:15px">' + (datas.length ? dbr(datas[0]) + ' a ' + dbr(datas[datas.length - 1]) : '–') + '</div><div class="s">' + linhas.length + ' movimentos' + (antes.length ? ' · ' + antes.length + ' anteriores ao saldo de abertura (' + dbr(ab.data) + ') ficam de fora' : '') + (lido.ignoradas ? ' · ' + lido.ignoradas + ' ignorados (falha/cancelado)' : '') + '</div></div>' +
     '<div class="card kpi"><div class="l">Novos</div><div class="v">' + novos.length + '</div><div class="s"><span class="cr-t">+' + mt(ent) + '</span> · <span class="db-t">−' + mt(sai) + '</span></div></div>' +
     '<div class="card kpi"><div class="l">Já existiam no sistema</div><div class="v">' + dup + '</div><div class="s">ficam como estão</div></div>' +
-    '<div class="card kpi"><div class="l">Propostas do sistema</div><div class="v">' + (cnt('regra') + cnt('sug')) + '</div><div class="s">' + cnt('regra') + ' por regra · ' + cnt('sug', 'alta') + ' alta · ' + cnt('sug', 'média') + ' média</div></div></div>';
-  if (!novos.length) {
-    h += '<p>Todos os movimentos deste arquivo já estão no sistema. Nada a importar.</p></div><footer><button class="btn pri" data-x>Fechar</button></footer>';
+    '<div class="card kpi"><div class="l">Propostas do sistema</div><div class="v">' + (cnt('regra') + cnt('sug')) + '</div><div class="s">' + cnt('regra') + ' por regra · ' + cnt('sug', 'alta') + ' alta · ' + cnt('sug', 'média') + ' média</div></div>' +
+    '<div class="card kpi"><div class="l">Conferência do período</div><div class="v" style="font-size:15px" class="' + (Math.abs(netSis - netArq) > 0.005 ? 'neg' : 'pos') + '">' + (Math.abs(netSis - netArq) > 0.005 ? '<span class="neg">Diferença ' + mt(netSis - netArq) + '</span>' : '<span class="pos">✓ Confere</span>') + '</div><div class="s">líquido no arquivo ' + mt(netArq) + ' · no sistema após importar ' + mt(netSis) + '</div></div></div>';
+  if (extras.length) h += '<div class="card" style="padding:10px 12px;margin-bottom:12px;border-color:var(--neg)"><b class="neg">⚠ ' + extras.length + ' movimento(s) estão no sistema, dentro deste período, mas não aparecem no arquivo do banco</b> <span class="small muted">— normalmente são duplicados (importados de um arquivo com descrição ou data diferente). Os marcados serão excluídos do sistema.</span>' +
+    '<div class="cand" style="max-height:24vh;margin-top:8px"><table><thead><tr><th></th><th>Data</th><th>Descrição</th><th class="n">Valor</th><th>Situação</th><th>Importado de</th></tr></thead><tbody>' +
+    extras.map(function (e) { var marc = e.situacao === 'Pendente' || e.situacao === 'Ignorado' || (e.situacao === 'Classificado' && e.auto); return '<tr><td><input type="checkbox" class="px" value="' + e.id + '"' + (marc ? ' checked' : '') + '></td><td class="small">' + dbr(e.data) + '</td><td class="small"><b>' + esc(e.descricao) + '</b></td><td class="n">' + m(e.valor) + '</td><td class="small">' + esc(e.situacao) + (e.categoria ? ' · ' + esc(e.categoria) : '') + (e.situacao === 'Conciliado' ? ' <span class="muted">(o vínculo será desfeito; o lançamento continua)</span>' : '') + '</td><td class="small muted">' + esc(e.arquivo || '') + '</td></tr>'; }).join('') + '</tbody></table></div></div>';
+  if (!novos.length && !extras.length) {
+    h += '<p>Todos os movimentos deste arquivo já estão no sistema e o período confere. Nada a importar.</p></div><footer><button class="btn pri" data-x>Fechar</button></footer>';
+  } else if (!novos.length) {
+    h += '<p>Nenhum movimento novo neste arquivo.</p><div class="err" id="perr"></div></div><footer><button class="btn" data-x style="margin-right:auto">Cancelar</button><button class="btn danger" id="pdel">Excluir marcados</button></footer>';
   } else {
     h += '<div class="filters" style="margin-bottom:6px"><span class="small muted">Marcar:</span><button class="btn sm" data-m="regra">regras</button><button class="btn sm" data-m="alta">sugestões alta</button><button class="btn sm" data-m="média">sugestões média</button><button class="btn sm" data-m="todos">todas</button><button class="btn sm ghost" data-m="nenhum">nenhuma</button></div>' +
       '<div class="cand" style="max-height:52vh"><table><thead><tr><th></th><th>Data</th><th>Descrição no banco</th><th class="n">Entrada</th><th class="n">Saída</th><th>Proposta</th></tr></thead><tbody>' +
@@ -1436,7 +1456,15 @@ function previaExtrato(lido, arquivo) {
   }
   var box = $('#mbox'); box.innerHTML = h; box.classList.add('wide'); $('#modal').classList.add('on');
   $$('[data-x]', box).forEach(function (b) { b.onclick = closeModal; });
-  if (!novos.length) return;
+  var excluir = function () {
+    var ids = $$('.px:checked', box).map(function (c) { return c.value; });
+    return ids.reduce(function (p, id) { return p.then(function () { return run('deleteRecord', 'Extrato', id); }); }, Promise.resolve()).then(function () { return ids.length; });
+  };
+  if (!novos.length) {
+    var pd = $('#pdel', box); if (!pd) return;
+    pd.onclick = function () { pd.disabled = true; pd.textContent = 'Excluindo…'; excluir().then(function (n) { closeModal(); toast(n + ' movimento(s) excluídos.'); return load(); }).catch(function (x) { var el = $('#perr', box); el.style.display = 'block'; el.textContent = x; pd.disabled = false; pd.textContent = 'Excluir marcados'; }); };
+    return;
+  }
   var ok = $('#pok', box), so = $('#pso', box);
   var conta = function () { var n = $$('.pv:checked', box).length + $$('.pc', box).filter(function (x) { return x.value; }).length; ok.textContent = 'Conciliar' + (n ? ' (' + n + ' marcados)' : ''); };
   $$('.pv', box).forEach(function (c) { c.onchange = conta; }); $$('.pc', box).forEach(function (c) { c.onchange = conta; }); conta();
@@ -1450,20 +1478,21 @@ function previaExtrato(lido, arquivo) {
     var marc = {}, cats = {};
     if (aplicar) { $$('.pv:checked', box).forEach(function (c) { marc[c.value] = 1; }); $$('.pc', box).forEach(function (c) { if (c.value) cats[c.dataset.t] = c.value; }); }
     ok.disabled = so.disabled = true; ok.textContent = 'Gravando…';
+    var exclu = 0;
     var linhas = novos.map(function (e) {
       var o = Object.assign({}, e), p = prop[e._tmp]; delete o._tmp;
       var c = cats[e._tmp];
       if (c) { var deRegra = p && p.k === 'regra' && p.r.categoria === c; o.situacao = 'Classificado'; o.categoria = c; o.tipo = deRegra ? p.r.tipo : tipoDaCat(c); o.auto = !!deRegra; }
       return o;
     });
-    run('importarExtrato', linhas, { arquivo: arquivo, ignoradas: lido.ignoradas }).then(function (res) {
+    excluir().then(function (nx) { exclu = nx; return run('importarExtrato', linhas, { arquivo: arquivo, ignoradas: lido.ignoradas + antes.length }); }).then(function (res) {
       var ids = res.ids || {}, fila = novos.filter(function (e) { return marc[e._tmp] && prop[e._tmp].k === 'sug' && ids[e.chave]; }), n = 0, falhas = 0;
       return fila.reduce(function (pr, e) {
         return pr.then(function () { ok.textContent = 'Conciliando ' + (++n) + ' de ' + fila.length + '…'; return conciliarComo(Object.assign({}, e, { id: ids[e.chave] }), prop[e._tmp].s.ids, true).catch(function () { falhas++; }); });
       }, Promise.resolve()).then(function () {
         closeModal();
         var nr = Object.keys(cats).length;
-        toast(res.novos + ' movimentos importados' + (aplicar ? ' · ' + nr + ' classificados · ' + (fila.length - falhas) + ' conciliados' : ' como pendentes') + (falhas ? ' · ' + falhas + ' não conciliaram (ficaram pendentes)' : '') + '.');
+        toast(res.novos + ' movimentos importados' + (aplicar ? ' · ' + nr + ' classificados · ' + (fila.length - falhas) + ' conciliados' : ' como pendentes') + (falhas ? ' · ' + falhas + ' não conciliaram (ficaram pendentes)' : '') + (exclu ? ' · ' + exclu + ' excluídos (não estavam no arquivo)' : '') + '.');
         return load();
       });
     }).catch(function (x) { var el = $('#perr', box); el.style.display = 'block'; el.textContent = x; ok.disabled = so.disabled = false; conta(); });
