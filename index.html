@@ -665,6 +665,18 @@ function bindFilters(view) {
       el.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); aplica(); } };
       return;
     }
+    if (el.type === 'number') {   // valor: aplica quando a pessoa para de digitar, sem perder o foco
+      var aplicaN = function () {
+        S.f[view] = S.f[view] || {}; if ((S.f[view][el.dataset.f] || '') === el.value) return;
+        var foco = document.activeElement === el, id = el.dataset.f;
+        S.f[view][id] = el.value; render();
+        if (foco) { var n = $('[data-f="' + id + '"]'); if (n) n.focus(); }
+      };
+      el.oninput = function () { clearTimeout(el._t); el._t = setTimeout(aplicaN, 700); };
+      el.onblur = function () { clearTimeout(el._t); aplicaN(); };
+      el.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(el._t); aplicaN(); } };
+      return;
+    }
     el.oninput = el.onchange = function () {
       S.f[view] = S.f[view] || {}; S.f[view][el.dataset.f] = el.value;
       var pos = el.selectionStart; var id = el.dataset.f;
@@ -1203,7 +1215,10 @@ function filtConc() {
     var st = F('sit');
     if (st === 'Sugestão') { if (e.situacao !== 'Pendente' || !S.sug[e.id]) return false; }
     else if (st && e.situacao !== st) return false;
-    if (q && ([e.descricao, e.detalhe, e.referencia, e.nota, e.cartao, e.categoria, e.obs, e.id].join(' ') + ' ' + (d.concByExt[e.id] || []).map(function (id) { var l = d.lancById[id]; return l ? l.pedido + ' ' + contraparte(l) : ''; }).join(' ')).toLowerCase().indexOf(q) < 0) return false;
+    var av = Math.abs(Number(e.valor));
+    if (F('vmin') !== '' && av < Number(F('vmin'))) return false;
+    if (F('vmax') !== '' && av > Number(F('vmax'))) return false;
+    if (q && ([e.descricao, e.detalhe, e.referencia, e.nota, e.cartao, e.categoria, e.obs, e.id, NUM.format(av), av.toFixed(2), String(av)].join(' ') + ' ' + (d.concByExt[e.id] || []).map(function (id) { var l = d.lancById[id]; return l ? l.pedido + ' ' + contraparte(l) : ''; }).join(' ')).toLowerCase().indexOf(q) < 0) return false;
     return true;
   }).sort(function (a, b) { return b.data.localeCompare(a.data) || String(b.momento || '').localeCompare(String(a.momento || '')); });
 }
@@ -1234,7 +1249,8 @@ function vConc() {
     card('Classificado', 'Despesas e transferências', mt(k.desp[1] + k.transf[1]), k.desp[0] + ' despesas (' + mt(k.desp[1]) + ') · ' + k.transf[0] + ' transf. (' + mt(k.transf[1]) + ')') +
     card('Pendente', 'Pendentes', mt(k.pend[1]), k.pend[0] + ' movimentos' + (k.ign[0] ? ' · ' + k.ign[0] + ' ignorados' : '')) +
     card('Sugestão', 'Com sugestão do sistema', String(k.sug), k.alta + ' de alta confiança') + '</div>';
-  h += '<div class="filters"><input type="search" placeholder="Descrição, referência, pedido…" data-f="q" value="' + esc(F('q')) + '">' +
+  h += '<div class="filters"><input type="search" placeholder="Descrição, referência, pedido ou valor…" data-f="q" value="' + esc(F('q')) + '">' +
+    '<label class="small muted">valor de <input type="number" step="0.01" min="0" data-f="vmin" value="' + esc(F('vmin')) + '" placeholder="0,00" style="min-width:0;width:110px"></label><label class="small muted">até <input type="number" step="0.01" min="0" data-f="vmax" value="' + esc(F('vmax')) + '" placeholder="0,00" style="min-width:0;width:110px"></label>' +
     '<select data-f="sit">' + opt(['Pendente', 'Sugestão', 'Conciliado', 'Classificado', 'Ignorado'], F('sit'), 'Todas as situações') + '</select>' +
     '<select data-f="cat">' + opt(uniq(d.Extrato.map(function (e) { return e.categoria; })), F('cat'), 'Todas as categorias') + '</select>' +
     '<select data-f="banco">' + opt(uniq(d.Extrato.map(function (e) { return e.banco; })), F('banco'), 'Todos os bancos') + '</select>' +
